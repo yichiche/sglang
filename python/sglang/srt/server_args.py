@@ -1326,6 +1326,7 @@ class ServerArgs:
                 "triton",
                 "trtllm_mla",
                 "trtllm_mha",
+                "wave",
             ],
             default=ServerArgs.attention_backend,
             help="Choose the kernels for attention layers.",
