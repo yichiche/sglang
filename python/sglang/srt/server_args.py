@@ -1209,6 +1209,7 @@ class ServerArgs:
                 "torch_native",
                 "ascend",
                 "triton",
+                "wave",
             ],
             default=ServerArgs.attention_backend,
             help="Choose the kernels for attention layers.",
