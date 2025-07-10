@@ -1,6 +1,6 @@
 """
 Usage:
-python3 -m unittest test_triton_attention_backend.TestTritonAttnBackend.test_mmlu
+python3 -m unittest test_wave_attention_backend.TestWaveAttnBackend.test_mmlu
 """
 
 import unittest

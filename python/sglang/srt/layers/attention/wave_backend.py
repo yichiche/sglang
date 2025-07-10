@@ -561,9 +561,10 @@ class WaveAttnBackend(AttentionBackend):
             )
 
         max_extend_len = self.forward_metadata.max_extend_len
-        # TODO: We ran into situtations where q_extend.shape[0] was
+        # TODO: We ran into situations where q_extend.shape[0] was
         # not equal to the value in extend_seq_lens which was max_extend_len.
         # This should not be required and is probably a bug in sglang.
+        # This issue is not shown in sglang v0.4.8post1 server mode for now
         computed_max_ext_seq_len = torch.max(forward_batch.extend_seq_lens)
         if computed_max_ext_seq_len != max_extend_len:
             assert len(forward_batch.extend_seq_lens) == 1
