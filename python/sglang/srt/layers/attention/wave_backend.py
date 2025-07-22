@@ -105,12 +105,11 @@ class WaveAttnBackend(AttentionBackend):
         super().__init__()
 
         # Set unique cache dir for each process to avoid cache write races
-        import iree.turbine.kernel.wave.cache as wave_cache
-
-        base_cache_dir = wave_cache.CACHE_BASE_DIR
+        import wave_lang.kernel.wave.cache as cache
+        base_cache_dir = cache.CACHE_BASE_DIR
         new_dir = base_cache_dir / f"worker_{model_runner.tp_rank}"
         logger.info(f"Setting Wave cache dir: {new_dir}")
-        wave_cache.CACHE_BASE_DIR = new_dir
+        cache.CACHE_BASE_DIR = new_dir
 
         self.decode_attention_fwd = decode_attention_fwd
         self.extend_attention_fwd = extend_attention_wave
