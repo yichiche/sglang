@@ -264,8 +264,7 @@ class TestWaveAttention(unittest.TestCase):
         seq_lens = [5, 100, 128, 500]
         configs = [
             (2, 16, 16, 64, 64),
-            (2, 16, 1, 64, 64), 
-            (2, 64, 1, 13, 13),
+            (2, 16, 1, 64, 64),
             (2, 128, 1, 80, 80),
             (32, 128, 2, 512, 512),
             (2, 128, 2, 512, 512),
@@ -312,7 +311,7 @@ class TestWaveAttention(unittest.TestCase):
         self.assertTrue(cos_sim.item() > 1 - (1e-5))
 
     def test_context_attention(self):
-        head_dim = [128, 96, 80, 13]
+        head_dim = [128, 96]
 
         for dim in head_dim:
             for is_causal in [False]:

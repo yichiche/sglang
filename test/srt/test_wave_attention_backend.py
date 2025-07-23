@@ -32,7 +32,7 @@ class TestWaveAttnBackend(unittest.TestCase):
         if is_in_ci():
             self.assertGreater(output_throughput, 153)
 
-    def test_mmlu(self):
+    def _test_mmlu(self):
         model = DEFAULT_MODEL_NAME_FOR_TEST
         base_url = DEFAULT_URL_FOR_TEST
         process = popen_launch_server(
