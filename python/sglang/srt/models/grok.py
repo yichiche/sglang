@@ -69,7 +69,9 @@ from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.loader import DefaultModelLoader
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.utils import add_prefix, dispose_tensor, dump_to_file
+from sglang.srt.utils import add_prefix, dispose_tensor, dump_to_file, is_hip
+
+_is_hip = is_hip()
 
 logger = logging.getLogger(__name__)
 
@@ -383,7 +385,7 @@ class Grok1Attention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None if _is_hip else quant_config,
             tp_rank=attn_tp_rank,
             tp_size=attn_tp_size,
             load_presharded_attn=self.load_presharded_attn,
@@ -393,7 +395,7 @@ class Grok1Attention(nn.Module):
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
-            quant_config=quant_config,
+            quant_config= None if _is_hip else quant_config,
             reduce_results=reduce_results,
             tp_rank=attn_tp_rank,
             tp_size=attn_tp_size,
