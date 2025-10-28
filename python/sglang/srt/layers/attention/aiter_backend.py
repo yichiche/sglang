@@ -823,87 +823,42 @@ class AiterAttnBackend(AttentionBackend):
             #k_buffer = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).to(torch.bfloat16)
             k_buffer = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
 
-            gpu = torch.cuda.current_device()
-            device_properties = torch.cuda.get_device_properties(gpu)
-            cu_num = device_properties.multi_processor_count
-
-            nhead = layer.tp_q_head_num
-            max_qo_tiles_per_batch = int(math.ceil(self.forward_metadata.max_q_len * nhead / 128))
-
-
-            batch_size = forward_batch.batch_size
-
-            work_meta_data = torch.empty([10], dtype=torch.uint64, device="cuda")
-            work_indptr = torch.empty([cu_num + 1], dtype=torch.int32, device="cuda")
-            work_info_set = torch.empty(
-                [batch_size * max_qo_tiles_per_batch * cu_num, 8],
-                dtype=torch.int32,
-                device="cuda",
-            ).fill_(-1)
-
-
-            reduce_indptr = torch.empty(
-                [batch_size * max_qo_tiles_per_batch + 1], dtype=torch.int32, device="cuda"
-            )
-            reduce_final_map = torch.empty(
-                [batch_size * max_qo_tiles_per_batch, 2], dtype=torch.int32, device="cuda"
-            )
-            reduce_partial_map = torch.empty(
-                [batch_size * max_qo_tiles_per_batch * cu_num], dtype=torch.int32, device="cuda"
-            )
-
-            page_size = 1
-            nhead_kv = 1
-            mtp = 1
-
-            split_params = {
-                "kv_granularity": max(page_size, 16),
-                "max_seqlen_qo": self.forward_metadata.max_q_len,
-                "uni_seqlen_qo": mtp,
-                "fast_mode": 1,
-            }
-
-            meta = get_mla_metadata_v1(
-                self.forward_metadata.qo_indptr,
-                self.forward_metadata.kv_indptr,
-                nhead // nhead_kv,
-                nhead_kv,
-                True,
-                work_meta_data,
-                work_info_set,
-                work_indptr,
-                reduce_indptr,
-                reduce_final_map,
-                reduce_partial_map,
-                split_params=split_params
-            )
-
-
             if self.kv_cache_dtype == fp8_dtype:
-                q_input, q_scale = scaled_fp8_quant(
-                    q,
+                # print("fp8_dtype")
+                q_fp8, q_scale = scaled_fp8_quant(q)
+                q_scale = q_scale.to(torch.float)
+
+                kv_buffer_fp8 = k_buffer.to(fp8_dtype)
+                kv_scale = torch.ones([1], dtype=torch.float, device="cuda")
+                
+                mla_decode_fwd(
+                    q_fp8.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+                    kv_buffer_fp8.view(-1, 1, 1, layer.qk_head_dim),
+                    o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
+                    self.forward_metadata.qo_indptr,
+                    self.forward_metadata.kv_indptr,
+                    self.forward_metadata.kv_indices,
+                    self.forward_metadata.kv_last_page_len,
+                    self.forward_metadata.max_q_len,
+                    layer.scaling,
+                    layer.logit_cap,
+                    q_scale=q_scale,
+                    kv_scale=kv_scale,
                 )
             else:
-                q_input = q
-
-            mla_decode_fwd(
-                q_input.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
-                k_buffer.view(-1, 1, 1, layer.qk_head_dim),
-                o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
-                self.forward_metadata.qo_indptr,
-                self.forward_metadata.kv_indptr,
-                self.forward_metadata.kv_indices,
-                self.forward_metadata.kv_last_page_len,
-                self.forward_metadata.max_q_len,
-                layer.scaling,
-                layer.logit_cap,
-                work_meta_data=work_meta_data,
-                work_indptr=work_indptr,
-                work_info_set=work_info_set,
-                reduce_indptr=reduce_indptr,
-                reduce_final_map=reduce_final_map,
-                reduce_partial_map=reduce_partial_map,
-            )
+                # print("bfloat16")
+                mla_decode_fwd(
+                    q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+                    k_buffer.view(-1, 1, 1, layer.qk_head_dim),
+                    o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
+                    self.forward_metadata.qo_indptr,
+                    self.forward_metadata.kv_indptr,
+                    self.forward_metadata.kv_indices,
+                    self.forward_metadata.kv_last_page_len,
+                    self.forward_metadata.max_q_len,
+                    layer.scaling,
+                    layer.logit_cap,
+                )
             k_buffer = k_buffer.view(-1, 1, layer.qk_head_dim)
         else:
             self.logits_soft_cap = layer.logit_cap
