@@ -43,17 +43,16 @@ from sglang.srt.speculative.spec_info import SpecInput
 from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_npu
 from sglang.srt.utils.common import rank0_log
 
-cutedsl_fused_sigmoid_gating_delta_rule_update = None
-_cutedsl_import_error: Optional[Exception] = None
-
 if not is_cpu() and not is_npu():
-    # Optional dependency: only needed when SGLANG_USE_CUTEDSL_GDN_DECODE=1.
+    # fix import error on CPU device, no impacts when non-CPU path
     try:
         from sglang.jit_kernel.cutedsl_gdn import (
             cutedsl_fused_sigmoid_gating_delta_rule_update,
         )
-    except Exception as e:
-        _cutedsl_import_error = e
+    except ModuleNotFoundError:
+        # CuTe DSL path requires cuda-python (cuda.bindings.*). Keep runtime usable
+        # by falling back to non-CuTe kernels when it's unavailable.
+        cutedsl_fused_sigmoid_gating_delta_rule_update = None
     from sglang.srt.layers.attention.fla.chunk import chunk_gated_delta_rule
     from sglang.srt.layers.attention.fla.chunk_delta_h import (
         CHUNK_SIZE as FLA_CHUNK_SIZE,
@@ -851,11 +850,6 @@ class GDNAttnBackend(MambaAttnBackendBase):
             )
             use_cutedsl = False
         rank0_log(f"CuTe DSL GDN decode enabled: {use_cutedsl}")
-        if use_cutedsl and cutedsl_fused_sigmoid_gating_delta_rule_update is None:
-            raise ImportError(
-                "SGLANG_USE_CUTEDSL_GDN_DECODE=1 requires optional dependency "
-                "`cutlass` (via sglang.jit_kernel.cutedsl_gdn), but it is not available."
-            ) from _cutedsl_import_error
         self._kernel_func = (
             cutedsl_fused_sigmoid_gating_delta_rule_update
             if use_cutedsl
