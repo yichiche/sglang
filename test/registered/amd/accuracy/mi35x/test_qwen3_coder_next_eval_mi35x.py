@@ -80,23 +80,29 @@ class ModelConfig:
 def get_qwen3_coder_next_models() -> List[ModelConfig]:
     """Get Qwen3-Coder-Next model configurations for MI35x."""
     model_path = get_model_path()
+    common_kwargs = {
+        "model_path": model_path,
+        "tp_size": 8,
+        "accuracy_threshold": 0.90,
+        "timeout": 3600,
+    }
+    common_args = [
+        "--attention-backend",
+        "aiter",
+        "--chunked-prefill-size",
+        "131072",
+        "--disable-radix-cache",
+        "--mem-fraction-static",
+        "0.8",
+        "--trust-remote-code",
+    ]
     return [
         # Basic — matches run_qwen3-coder-next_spec.sh
         ModelConfig(
-            model_path=model_path,
-            tp_size=8,
-            accuracy_threshold=0.90,
-            timeout=3600,
+            **common_kwargs,
             variant="basic",
-            other_args=[
-                "--attention-backend",
-                "aiter",
-                "--chunked-prefill-size",
-                "131072",
-                "--disable-radix-cache",
-                "--mem-fraction-static",
-                "0.8",
-                "--trust-remote-code",
+            other_args=common_args
+            + [
                 "--kv-cache-dtype",
                 "fp8_e4m3",
             ],
@@ -106,20 +112,10 @@ def get_qwen3_coder_next_models() -> List[ModelConfig]:
         # Note: no --kv-cache-dtype fp8_e4m3 because Triton extend_attention
         # used by MTP does not support fp8 kv cache on gfx950.
         ModelConfig(
-            model_path=model_path,
-            tp_size=8,
-            accuracy_threshold=0.90,
-            timeout=3600,
+            **common_kwargs,
             variant="mtp",
-            other_args=[
-                "--attention-backend",
-                "aiter",
-                "--chunked-prefill-size",
-                "131072",
-                "--disable-radix-cache",
-                "--mem-fraction-static",
-                "0.8",
-                "--trust-remote-code",
+            other_args=common_args
+            + [
                 "--speculative-algorithm",
                 "EAGLE",
                 "--speculative-num-steps",

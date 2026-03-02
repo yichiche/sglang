@@ -30,25 +30,28 @@ register_amd_ci(est_time=3600, suite="stage-c-test-large-8-gpu-amd-mi35x")
 QWEN3_CODER_NEXT_MODEL_PATH = "Qwen/Qwen3-Coder-Next"
 SERVER_LAUNCH_TIMEOUT = 1800
 
+COMMON_ARGS = [
+    "--tp",
+    "8",
+    "--attention-backend",
+    "aiter",
+    "--chunked-prefill-size",
+    "131072",
+    "--disable-radix-cache",
+    "--mem-fraction-static",
+    "0.8",
+    "--trust-remote-code",
+]
+
 
 class TestQwen3CoderNext(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = QWEN3_CODER_NEXT_MODEL_PATH
         cls.base_url = DEFAULT_URL_FOR_TEST
-        other_args = [
-            "--tp",
-            "8",
-            "--attention-backend",
-            "aiter",
+        other_args = COMMON_ARGS + [
             "--kv-cache-dtype",
             "fp8_e4m3",
-            "--chunked-prefill-size",
-            "131072",
-            "--disable-radix-cache",
-            "--mem-fraction-static",
-            "0.8",
-            "--trust-remote-code",
         ]
         cls.process = popen_launch_server(
             cls.model,
@@ -106,17 +109,7 @@ class TestQwen3CoderNextMTP(CustomTestCase):
         # TODO: Support MTP with fp8 kv cache on gfx950.
         # Note: no --kv-cache-dtype fp8_e4m3 because Triton extend_attention
         # used by MTP does not support fp8 kv cache on gfx950.
-        other_args = [
-            "--tp",
-            "8",
-            "--attention-backend",
-            "aiter",
-            "--chunked-prefill-size",
-            "131072",
-            "--disable-radix-cache",
-            "--mem-fraction-static",
-            "0.8",
-            "--trust-remote-code",
+        other_args = COMMON_ARGS + [
             "--speculative-algorithm",
             "EAGLE",
             "--speculative-num-steps",
@@ -137,7 +130,7 @@ class TestQwen3CoderNextMTP(CustomTestCase):
     def tearDownClass(cls):
         kill_process_tree(cls.process.pid)
 
-    def _test_a_gsm8k(self):
+    def test_a_gsm8k(self):
         """GSM8K few-shot accuracy with MTP (runs first to warm up server)."""
         requests.get(self.base_url + "/flush_cache")
 
@@ -168,7 +161,7 @@ class TestQwen3CoderNextMTP(CustomTestCase):
             self.assertGreater(metrics["accuracy"], 0.90)
             self.assertGreater(avg_spec_accept_length, 2.0)
 
-    def _test_bs_1_speed(self):
+    def test_bs_1_speed(self):
         """Batch-size 1 decode speed with MTP."""
         args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
         acc_length, speed = send_one_prompt(args)
