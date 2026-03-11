@@ -2,6 +2,9 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
+import os
+
 import aiter
 import torch
 
@@ -12,6 +15,14 @@ from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend i
     AttentionMetadataBuilder,
 )
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
+
+logger = logging.getLogger(__name__)
+
+_use_fp8_attn = os.environ.get("SGLANG_AITER_FP8_ATTN", "0") == "1"
+_fp8_dtype = torch.float8_e4m3fn
+
+if _use_fp8_attn:
+    logger.info("DiT FP8 attention enabled via SGLANG_AITER_FP8_ATTN=1")
 
 
 class AITerBackend(AttentionBackend):
@@ -59,6 +70,7 @@ class AITerImpl(AttentionImpl):
             )
         self.causal = causal
         self.dropout_p = dropout_p
+        self.softmax_scale = softmax_scale
 
     def forward(
         self,
@@ -68,7 +80,8 @@ class AITerImpl(AttentionImpl):
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         """
-        Performs attention using aiter.flash_attn_func.
+        Performs attention using aiter.flash_attn_func (BF16) or
+        aiter.flash_attn_fp8_pertensor_func (FP8).
 
         Args:
             query: Query tensor of shape [batch_size, num_heads, seq_len, head_dim]
@@ -79,8 +92,29 @@ class AITerImpl(AttentionImpl):
         Returns:
             Output tensor of shape [batch_size, num_heads, seq_len, head_dim]
         """
-        # aiter.flash_attn_func expects tensors in [B, H, S, D] layout,
-        # which is what ring_attn provides.
+        if _use_fp8_attn:
+            if query.dtype != _fp8_dtype:
+                q_fp8, q_scale = aiter.per_tensor_quant(query, quant_dtype=_fp8_dtype)
+                k_fp8, k_scale = aiter.per_tensor_quant(key, quant_dtype=_fp8_dtype)
+                v_fp8, v_scale = aiter.per_tensor_quant(value, quant_dtype=_fp8_dtype)
+            else:
+                q_fp8, k_fp8, v_fp8 = query, key, value
+                one_scale = torch.tensor(1.0, dtype=torch.float32, device=query.device)
+                q_scale = k_scale = v_scale = one_scale
+
+            output = aiter.flash_attn_fp8_pertensor_func(
+                q_fp8,
+                k_fp8,
+                v_fp8,
+                q_descale=q_scale,
+                k_descale=k_scale,
+                v_descale=v_scale,
+                causal=self.causal,
+                softmax_scale=self.softmax_scale,
+            )
+            return output
+
+        # BF16 path (default)
         output, _ = aiter.flash_attn_func(
             query,
             key,
