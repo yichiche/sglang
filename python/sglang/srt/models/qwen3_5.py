@@ -86,8 +86,10 @@ from sglang.srt.utils import (
     LazyValue,
     add_prefix,
     cpu_has_amx_support,
+    get_bool_env_var,
     is_cpu,
     is_cuda,
+    is_hip,
     is_npu,
     make_layers,
     set_weight_attrs,
@@ -98,6 +100,8 @@ logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
 _is_npu = is_npu()
 _is_cpu = is_cpu()
+_is_hip = is_hip()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 _is_amx_available = cpu_has_amx_support()
 
 
@@ -1436,6 +1440,19 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         self.is_mrope_enabled = "mrope_section" in rope_config
 
         self.deepstack_visual_indexes = self.visual.deepstack_visual_indexes
+        self.enable_fused_moe = True if _use_aiter else False
+        self.num_fused_shared_experts = (
+            0 if not _use_aiter else self._get_num_fused_shared_experts()
+        )
+
+    def _get_num_fused_shared_experts(self):
+        if not (
+            hasattr(self.model, "layers")
+            and len(self.model.layers) > 0
+            and hasattr(self.model.layers[0].mlp, "num_fused_shared_experts")
+        ):
+            return 0
+        return self.model.layers[0].mlp.num_fused_shared_experts
 
     def get_embed_and_head(self):
         embed = self.model.embed_tokens.weight if self.pp_group.is_first_rank else None
@@ -1467,13 +1484,20 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             ("in_proj_ba.", "in_proj_a.", 1),
         ]
 
+        text_config = getattr(self.config, "text_config", self.config)
+        num_experts_base = text_config.num_experts
+
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
+            num_experts=(
+                self.config.num_experts
+                if not _use_aiter
+                else num_experts_base + self.num_fused_shared_experts
+            ),
         )
 
         # Skip loading extra parameters for GPTQ/modelopt models.
@@ -1495,6 +1519,34 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         ]
 
         num_experts = self.config.num_experts
+        if self.enable_fused_moe:
+            fused_expert_params_mapping += [
+                (
+                    "experts.w13_",
+                    f"experts.{num_experts_base}.gate_proj.",
+                    num_experts_base,
+                    "w1",
+                ),
+                (
+                    "experts.w13_",
+                    f"experts.{num_experts_base}.up_proj.",
+                    num_experts_base,
+                    "w3",
+                ),
+                (
+                    "experts.w13_",
+                    f"experts.{num_experts_base}.gate_up_proj.",
+                    num_experts_base,
+                    "w1",
+                ),
+                (
+                    "experts.w2_",
+                    f"experts.{num_experts_base}.down_proj.",
+                    num_experts_base,
+                    "w2",
+                ),
+            ]
+            num_experts = num_experts_base + self.num_fused_shared_experts
 
         def load_fused_expert_weights(
             name: str,
@@ -1539,6 +1591,13 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 and (layer_id < self.start_layer or layer_id >= self.end_layer)
             ):
                 continue
+
+            if self.enable_fused_moe:
+                if "mlp.shared_expert." in name:
+                    name = name.replace(
+                        "mlp.shared_expert.",
+                        f"mlp.experts.{num_experts_base}.",
+                    )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if name.endswith("experts.gate_up_proj") or name.endswith(
@@ -1595,23 +1654,68 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                                 params_dict,
                                 loaded_weight[0],
                                 "w1",
-                                num_experts,
+                                (
+                                    num_experts
+                                    if not self.enable_fused_moe
+                                    else num_experts_base
+                                    + self.num_fused_shared_experts
+                                ),
                             )
                             load_fused_expert_weights(
                                 name_mapped,
                                 params_dict,
                                 loaded_weight[1],
                                 "w3",
-                                num_experts,
+                                (
+                                    num_experts
+                                    if not self.enable_fused_moe
+                                    else num_experts_base
+                                    + self.num_fused_shared_experts
+                                ),
                             )
-                        else:
+                        elif "experts.down_proj" in name:
                             load_fused_expert_weights(
                                 name_mapped,
                                 params_dict,
                                 loaded_weight,
                                 shard_id,
-                                num_experts,
+                                (
+                                    num_experts
+                                    if not self.enable_fused_moe
+                                    else num_experts_base
+                                    + self.num_fused_shared_experts
+                                ),
                             )
+                        else:
+                            param = params_dict[name_mapped]
+                            weight_loader = getattr(
+                                param, "weight_loader", default_weight_loader
+                            )
+                            param = params_dict[name_mapped]
+                            if f"{num_experts_base}.gate_up_proj" in name:
+                                loaded_weight = loaded_weight.chunk(2, dim=-2)
+                                weight_loader(
+                                    param,
+                                    loaded_weight[0],
+                                    name_mapped,
+                                    "w1",
+                                    expert_id,
+                                )
+                                weight_loader(
+                                    param,
+                                    loaded_weight[1],
+                                    name_mapped,
+                                    "w3",
+                                    expert_id,
+                                )
+                            else:
+                                weight_loader(
+                                    param,
+                                    loaded_weight,
+                                    name_mapped,
+                                    shard_id,
+                                    expert_id,
+                                )
                     else:
                         # Skip loading extra parameters for GPTQ models.
                         if (

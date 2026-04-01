@@ -61,7 +61,7 @@ from sglang.srt.layers.moe import (
 )
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
 from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
-from sglang.srt.layers.moe.topk import TopK
+from sglang.srt.layers.moe.topk import StandardTopKOutput, TopK, TopKOutputChecker
 from sglang.srt.layers.moe.utils import (
     RoutingMethodType,
     filter_moe_weight_param_global_expert,
@@ -87,8 +87,10 @@ from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
     add_prefix,
     cpu_has_amx_support,
+    get_bool_env_var,
     is_cpu,
     is_cuda,
+    is_hip,
     make_layers,
     use_intel_amx_backend,
 )
@@ -99,6 +101,8 @@ logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
 _is_cpu = is_cpu()
 _is_cpu_amx_available = cpu_has_amx_support()
+_is_hip = is_hip()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 
 class Qwen2MoeMLP(nn.Module):
@@ -172,6 +176,13 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {config.num_experts}."
             )
+        self.num_experts = config.num_experts
+        self.num_fused_shared_experts = 0
+        self.enable_fused_moe = True if _use_aiter else False
+        if self.enable_fused_moe:
+            self.num_fused_shared_experts = self._determine_num_fused_shared_experts(
+                config, quant_config
+            )
 
         self.topk = TopK(
             top_k=config.num_experts_per_tok,
@@ -181,14 +192,24 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
 
         self.experts = get_moe_impl_class(quant_config)(
             layer_id=self.layer_id,
-            top_k=config.num_experts_per_tok,
-            num_experts=config.num_experts
-            + get_global_server_args().ep_num_redundant_experts,
+            top_k=(
+                config.num_experts_per_tok
+                if not self.enable_fused_moe
+                else config.num_experts_per_tok + self.num_fused_shared_experts
+            ),
+            num_experts=(
+                config.num_experts + get_global_server_args().ep_num_redundant_experts
+                if not self.enable_fused_moe
+                else config.num_experts
+                + get_global_server_args().ep_num_redundant_experts
+                + self.num_fused_shared_experts
+            ),
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             quant_config=quant_config,
             prefix=add_prefix("experts", prefix),
             routing_method_type=RoutingMethodType.RenormalizeNaive,
+            num_fused_shared_experts=self.num_fused_shared_experts,
         )
 
         self.gate = ReplicatedLinear(
@@ -234,6 +255,24 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             self.top_k = config.num_experts_per_tok
         self.is_nextn = is_nextn
 
+    def _determine_num_fused_shared_experts(
+        self, config: PretrainedConfig, quant_config: Optional[QuantizationConfig]
+    ) -> int:
+        """Determine if shared expert can be fused with router experts (topk+1).
+        Fusion requires matching intermediate sizes, a supported backend, no
+        quantization, and no DeepEP.
+        """
+        if (
+            get_global_server_args().disable_shared_experts_fusion is True
+            or getattr(config, "shared_expert_intermediate_size", 0) <= 0
+            or config.shared_expert_intermediate_size != config.moe_intermediate_size
+            or get_moe_a2a_backend().is_deepep()
+        ):
+            # Falled back to non-fused version, return 0 shared_experts.
+            return 0
+        # Return 1 shared_expert for qwen model.
+        return 1
+
     def get_moe_weights(self):
         return [
             x.data
@@ -243,6 +282,46 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                 name, x, self.experts.num_local_experts
             )
         ]
+
+    def _get_shared_expert_weights(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Return sigmoid(shared_expert_gate) for fused shared expert weights."""
+        if self.num_fused_shared_experts <= 0 or self.shared_expert_gate is None:
+            return None
+        shared_out = self.shared_expert_gate(hidden_states)
+        shared_logits = shared_out[0] if isinstance(shared_out, tuple) else shared_out
+        return F.sigmoid(shared_logits)
+
+    def _append_shared_to_topk_output(
+        self,
+        topk_output: StandardTopKOutput,
+        hidden_states: torch.Tensor,
+    ) -> StandardTopKOutput:
+        """Append shared expert ids and weights to topk output before fused MoE."""
+        if self.num_fused_shared_experts <= 0:
+            return topk_output
+        shared_weights = self._get_shared_expert_weights(hidden_states)
+        if shared_weights is None:
+            return topk_output
+        M = topk_output.topk_ids.shape[0]
+        shared_expert_id = self.num_experts
+        shared_ids = torch.full(
+            (M, self.num_fused_shared_experts),
+            shared_expert_id,
+            dtype=topk_output.topk_ids.dtype,
+            device=topk_output.topk_ids.device,
+        )
+        shared_weights = shared_weights.expand(M, self.num_fused_shared_experts).to(
+            topk_output.topk_weights.dtype
+        )
+        fused_topk_ids = torch.cat([topk_output.topk_ids, shared_ids], dim=-1)
+        fused_topk_weights = torch.cat(
+            [topk_output.topk_weights, shared_weights], dim=-1
+        )
+        return StandardTopKOutput(
+            topk_weights=fused_topk_weights,
+            topk_ids=fused_topk_ids,
+            router_logits=topk_output.router_logits,
+        )
 
     def _forward_shared_experts(self, hidden_states: torch.Tensor):
         shared_output = None
@@ -299,6 +378,8 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         topk_output = self.topk(hidden_states, router_logits)
+        if self.enable_fused_moe and TopKOutputChecker.format_is_standard(topk_output):
+            topk_output = self._append_shared_to_topk_output(topk_output, hidden_states)
         return self.experts(hidden_states, topk_output)
 
     def forward_normal_dual_stream(
