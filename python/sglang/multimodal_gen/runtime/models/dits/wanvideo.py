@@ -65,12 +65,8 @@ from sglang.srt.utils import add_prefix
 logger = init_logger(__name__)
 _is_cuda = current_platform.is_cuda()
 
-try:
+if _use_aiter:
     from aiter.ops.rope import rope_cached_2c_fwd_inplace
-
-    _has_aiter_rope = True
-except ImportError:
-    _has_aiter_rope = False
 
 
 class WanImageEmbedding(torch.nn.Module):
@@ -557,7 +553,7 @@ class WanTransformerBlock(nn.Module):
             query, key = apply_flashinfer_rope_qk_inplace(
                 query, key, cos_sin_cache, is_neox=False
             )
-        elif _use_aiter and _has_aiter_rope:
+        elif _use_aiter:
             query_shape = query.shape
             key_shape = key.shape
             num_tokens = query.shape[:-2].numel()
@@ -803,7 +799,7 @@ class WanTransformerBlock_VSA(nn.Module):
             query, key = apply_flashinfer_rope_qk_inplace(
                 query, key, cos_sin_cache, is_neox=False
             )
-        elif _use_aiter and _has_aiter_rope:
+        elif _use_aiter:
             query_shape = query.shape
             key_shape = key.shape
             num_tokens = query.shape[:-2].numel()
