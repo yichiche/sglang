@@ -245,14 +245,23 @@ class Qwen3GatedDeltaNet(nn.Module):
                 if output_dim is not None and module.tp_size > 1:
                     shard_size = param.data.shape[output_dim]
                     start_idx = module.tp_rank * shard_size
+                    if (
+                        _is_cpu and _is_amx_available
+                    ) and start_idx + shard_size > loaded_weight.shape[output_dim]:
+                        shard_size = loaded_weight.shape[output_dim] - start_idx
                     loaded_weight = loaded_weight.narrow(
                         output_dim, start_idx, shard_size
                     )
-                assert param.data.shape == loaded_weight.shape, (
-                    f"Shape mismatch: param {param.data.shape} vs "
-                    f"loaded {loaded_weight.shape}"
-                )
-                param.data.copy_(loaded_weight)
+                if _is_cpu and _is_amx_available:
+                    slices = tuple(slice(0, s) for s in loaded_weight.shape)
+                    param.data.zero_()
+                    param.data[slices].copy_(loaded_weight)
+                else:
+                    assert param.data.shape == loaded_weight.shape, (
+                        f"Shape mismatch: param {param.data.shape} vs "
+                        f"loaded {loaded_weight.shape}"
+                    )
+                    param.data.copy_(loaded_weight)
             else:
                 # Split checkpoint (int or tuple shard_id) → standard path
                 original_loader(param, loaded_weight, loaded_shard_id)
@@ -813,6 +822,11 @@ class Qwen3NextModel(nn.Module):
         for layer_id in self.layers_to_capture:
             setattr(self.layers[layer_id], "_is_layer_to_capture", True)
 
+    def set_dflash_layers_to_capture(self, layers_to_capture: list[int]):
+        self.layers_to_capture = layers_to_capture
+        for layer_id in self.layers_to_capture:
+            setattr(self.layers[layer_id], "_is_layer_to_capture", True)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -946,6 +960,9 @@ class Qwen3NextForCausalLM(nn.Module):
 
     def get_embed_and_head(self):
         return self.model.embed_tokens.weight, self.lm_head.weight
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.model.embed_tokens
 
     def set_embed_and_head(self, embed, head):
         del self.model.embed_tokens.weight
@@ -1126,6 +1143,18 @@ class Qwen3NextForCausalLM(nn.Module):
             )  # Specific layers for EAGLE3 support
         else:
             self.model.set_eagle3_layers_to_capture([val + 1 for val in layer_ids])
+
+    def set_dflash_layers_to_capture(self, layer_ids: list[int]):
+        if not self.pp_group.is_last_rank:
+            return
+
+        if layer_ids is None:
+            raise ValueError(
+                "DFLASH requires explicit layer_ids for aux hidden capture."
+            )
+
+        self.capture_aux_hidden_states = True
+        self.model.set_dflash_layers_to_capture([val + 1 for val in layer_ids])
 
 
 EntryClass = Qwen3NextForCausalLM
