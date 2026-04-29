@@ -595,7 +595,7 @@ jobs:
       fail-fast: false
       max-parallel: 1  # Run one at a time to avoid eviction from resource exhaustion during AITER kernel JIT
       matrix:
-        part: [0, 1, 2, 3]
+        part: [0, 1, 2, 3, 4, 5, 6]
     runs-on: ${{ format('linux-{0}-1gpu-sglang', inputs.runner_arch || (github.event_name == 'pull_request' && 'mi300' || 'mi325')) }}
     steps:
       - name: Checkout code
@@ -701,7 +701,7 @@ jobs:
             ci_sglang python3 sglang/multimodal_gen/test/run_suite.py \
               --suite 1-gpu \
               --partition-id ${{ matrix.part }} \
-              --total-partitions 4 \
+              --total-partitions 7 \
               -k "not flux_2" \
               ${{ needs.check-changes.outputs.continue_on_error == 'true' && '--continue-on-error' || '' }}
 
