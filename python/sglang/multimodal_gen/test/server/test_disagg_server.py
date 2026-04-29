@@ -226,7 +226,7 @@ class DisaggCluster:
             "--host",
             HOST,
             "--disagg-timeout",
-            "120",
+            "300",
             "--log-level",
             "info",
             *self.extra_role_args.get("server", []),
