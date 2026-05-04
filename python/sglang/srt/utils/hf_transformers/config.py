@@ -16,10 +16,11 @@
 from pathlib import Path
 from typing import Optional
 
+from transformers import PretrainedConfig
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 
 from sglang.srt.connector import create_remote_connector
-from sglang.srt.utils import is_remote_url, lru_cache_frozenset
+from sglang.srt.utils import is_remote_url, logger, lru_cache_frozenset
 from sglang.srt.utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 
 from ..hf_transformers_patches import _ensure_gguf_version

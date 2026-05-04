@@ -2027,9 +2027,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w2_weight = layer.w2_weight
 
         if self.block_quant:
-            quant_type = AiterQuantType.PER_128X128
             quant_type = (
-                QuantType.per_1x32 if self.is_fp4_expert else QuantType.per_128x128
+                AiterQuantType.PER_1X32
+                if self.is_fp4_expert
+                else AiterQuantType.PER_128X128
             )
 
             if self.is_fp4_expert:
@@ -2053,6 +2054,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w2_scale=w2_scale,
             expert_mask=layer.dispatcher.expert_mask_gpu if _use_aiter else None,
         )
+
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
     """
