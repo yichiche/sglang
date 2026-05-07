@@ -206,7 +206,7 @@ RUN pip uninstall -y aiter
 RUN git clone ${AITER_REPO} \
  && cd aiter \
  && git checkout ${AITER_COMMIT} \
- && git cherry-pick b639cb63bcac4672dce33a731fad042a65cb3649 \
+ && git cherry-pick --no-commit b639cb63bcac4672dce33a731fad042a65cb3649 \
  && git submodule update --init --recursive \
  && pip install -r requirements.txt
 
