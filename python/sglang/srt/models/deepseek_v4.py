@@ -81,10 +81,11 @@ from sglang.srt.utils import (
     log_info_on_rank0,
     make_layers,
     maybe_torch_compile,
+    is_gfx95_supported,
+    is_hip,
 )
 
 logger = logging.getLogger(__name__)
-
 from sglang.srt.environ import envs
 
 MOE_BIT_WISE_EQUAL_MODE = False
@@ -92,8 +93,30 @@ ATTN_BIT_WISE_EQUAL_MODE = False
 COMPRESSOR_BIT_WISE_EQUAL_MODE = False
 _FP8_WO_A_GEMM = envs.SGLANG_OPT_FP8_WO_A_GEMM.get()
 
-if _is_hip:
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and is_hip()
+_is_gfx95_supported = is_gfx95_supported()
+
+if _use_aiter:
     from aiter import rope_rotate_activation
+    if is_gfx95_supported():
+        from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+
+
+def _fused_rmsnorm_fp8_quant(hidden_states, weight, eps):
+    x_quant, x_bf16, _, _ = fused_rms_fp8_group_quant(
+        hidden_states,
+        weight,
+        eps,
+        inp2=None,
+        inp2_weight=None,
+        inp2_epsilon=None,
+        group_size=128,
+        dtype_quant=torch.float8_e4m3fn,
+        res1=None,
+        output_unquantized_inp1=True,
+    )
+    return x_quant, x_bf16
+
 
 _FREQS_CIS_TO_COS_SIN: dict[
     Tuple[int, torch.dtype, torch.device], Tuple[torch.Tensor, torch.Tensor]
@@ -1642,9 +1665,10 @@ class MQALayer(nn.Module):
         attn_backend: DeepseekV4Backend,
         freqs_cis: Optional[torch.Tensor] = None,
         q_out: Optional[torch.Tensor] = None,
+        x_quant=None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # [bs, q_lora_rank]
-        q, _ = self.wq_a(x)
+        # fp8 tuple: Fp8LinearMethod.apply handles isinstance(x, tuple), skips per1x128 quant
+        q, _ = self.wq_a(x_quant if x_quant is not None else x)
         # [bs, q_lora_rank]
         q = self.q_norm(q)
         q_lora = q  # only used for indexer
@@ -1654,9 +1678,8 @@ class MQALayer(nn.Module):
         # [bs, n_local_heads, head_dim]
         q = rms_normalize_triton(q, self.eps)
 
-        # [bs, head_dim]
-        kv, _ = self.wkv(x)
-        # [bs, head_dim]
+        # fp8 tuple: same as wq_a
+        kv, _ = self.wkv(x_quant if x_quant is not None else x)
         kv = self.kv_norm(kv)
 
         fused_rope(
@@ -1694,6 +1717,7 @@ class MQALayer(nn.Module):
                 forward_batch=forward_batch,
             )
 
+        # indexer/compressor: bf16 only (linear_bf16_fp32 needs .dtype)
         if self.indexer is not None:
             self.indexer(
                 x=x,
@@ -1716,6 +1740,7 @@ class MQALayer(nn.Module):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
         debug_return_kv: bool = False,
+        x_quant=None,
     ) -> torch.Tensor:
         if not get_attn_tp_context().input_scattered and x.shape[0] == 0:
             assert (
@@ -1751,7 +1776,8 @@ class MQALayer(nn.Module):
             )
         else:
             q, kv = self._forward_prepare(
-                x, positions, forward_batch, attn_backend, freqs_cis, q_out
+                x, positions, forward_batch, attn_backend, freqs_cis, q_out,
+                x_quant=x_quant,
             )
 
         # for TP attention, use the padded q, since q_out is set to the correct slice
@@ -2045,12 +2071,21 @@ class DeepseekV4DecoderLayer(nn.Module):
         hidden_states, post, comb = self.hc_pre(
             hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
         )  # -> [n, d]
-        hidden_states = self.input_layernorm(hidden_states)
+        if _use_aiter and _is_gfx95_supported:
+            x_quant, hidden_states = _fused_rmsnorm_fp8_quant(
+                hidden_states,
+                self.input_layernorm.weight,
+                self.input_layernorm.variance_epsilon,
+            )
+        else:
+            x_quant = None
+            hidden_states = self.input_layernorm(hidden_states)
 
         hidden_states = self.self_attn(
             x=hidden_states,
             positions=positions,
             forward_batch=forward_batch,
+            x_quant=x_quant,
         )
 
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
