@@ -31,7 +31,7 @@ ENV BUILD_TRITON="0"
 ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
-ENV AITER_COMMIT_DEFAULT="446260d19a95a26fcff5d2856b71c066f3b771f1"
+ENV AITER_COMMIT_DEFAULT="3c5f0ba937861da585ef0f72d20d9c8dba30ef3b"
 
 # ===============================
 # Base image 942 with rocm720 and args
@@ -41,7 +41,7 @@ ENV BUILD_TRITON="1"
 ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
-ENV AITER_COMMIT_DEFAULT="446260d19a95a26fcff5d2856b71c066f3b771f1"
+ENV AITER_COMMIT_DEFAULT="3c5f0ba937861da585ef0f72d20d9c8dba30ef3b"
 
 # ===============================
 # Base image 950 and args
@@ -51,7 +51,7 @@ ENV BUILD_TRITON="0"
 ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
-ENV AITER_COMMIT_DEFAULT="446260d19a95a26fcff5d2856b71c066f3b771f1"
+ENV AITER_COMMIT_DEFAULT="3c5f0ba937861da585ef0f72d20d9c8dba30ef3b"
 
 # ===============================
 # Base image 950 with rocm720 and args
@@ -61,7 +61,7 @@ ENV BUILD_TRITON="1"
 ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
-ENV AITER_COMMIT_DEFAULT="446260d19a95a26fcff5d2856b71c066f3b771f1"
+ENV AITER_COMMIT_DEFAULT="3c5f0ba937861da585ef0f72d20d9c8dba30ef3b"
 
 # ===============================
 # Chosen arch and args
@@ -85,6 +85,8 @@ ARG TRITON_COMMIT="42270451990532c67e69d753fbd026f28fcc4840"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG AITER_COMMIT=""
 ENV AITER_COMMIT="${AITER_COMMIT:-${AITER_COMMIT_DEFAULT}}"
+# Keep the Triton already installed in the image when AITER setup.py runs.
+ENV AITER_USE_SYSTEM_TRITON=1
 
 ARG LLVM_REPO="https://github.com/jrbyrnes/llvm-project.git"
 ARG LLVM_BRANCH="MainOpSelV2"
