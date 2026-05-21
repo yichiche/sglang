@@ -28,6 +28,7 @@ from sglang.jit_kernel.dsv4 import (
     fused_rope_inplace,
 )
 from sglang.srt.configs.deepseek_v4 import DeepSeekV4Config
+from sglang.srt.layers.deepseek_v4_rope import fused_norm_rope_inplace_triton
 from sglang.srt.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -455,9 +456,19 @@ class MQALayer(nn.Module):
     ) -> torch.Tensor:
         q, _ = self.wq_b(q)
         q = q.view(-1, self.n_local_heads, self.head_dim)
+
+        if _is_hip and positions is not None:
+            q_2d = q.view(-1, self.head_dim)
+            positions_expanded = positions.unsqueeze(1).expand(
+                -1, self.n_local_heads
+            ).reshape(-1)
+            fused_norm_rope_inplace_triton(
+                q_2d, None, self.eps, self.freqs_cis, positions=positions_expanded,
+            )
+            return q
+
         if q_out is None:
             q_out = torch.empty_like(q)
-        # Fused warp-per-(token, head) rmsnorm-self + RoPE + write to q_out.
         fused_q_norm_rope(q, q_out, self.eps, self.freqs_cis, positions)
         return q_out
 
