@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from sglang.jit_kernel.dsv4 import linear_bf16_fp32, triton_create_paged_compress_data
+from sglang.jit_kernel.dsv4.gemm import _use_aiter
 from sglang.jit_kernel.dsv4.compress_old import (
     CompressorDecodePlan,
     CompressorPrefillPlan,
@@ -387,7 +388,14 @@ class Compressor(nn.Module):
         return ret
 
     def compute_kv_score(self, x: torch.Tensor, forward_batch: ForwardBatch):
-        kv_score = linear_bf16_fp32(x, self.wkv_gate.weight)
+        if _use_aiter:
+            # linear_bf16_fp32 uses tgemm.mm + .float(); skip the .float() cast
+            # because downstream Triton kernels promote bf16→fp32 internally.
+            from aiter.tuned_gemm import tgemm
+
+            kv_score = tgemm.mm(x, self.wkv_gate.weight, otype=x.dtype)
+        else:
+            kv_score = linear_bf16_fp32(x, self.wkv_gate.weight)
 
         # CUDA path: delegate to backend
         if dsa_use_prefill_cp(forward_batch):
