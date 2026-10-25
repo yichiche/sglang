@@ -44,6 +44,7 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 # yapf: enable
 from sglang.multimodal_gen.runtime.utils.weight_attrs import set_weight_attrs
+from sglang.srt.utils import is_gfx1250_supported
 
 logger = init_logger(__name__)
 
@@ -51,9 +52,15 @@ IS_AMP_SUPPORTED = current_platform.is_amp_supported()
 _USE_AITER_TGEMM = current_platform.is_rocm() and envs.SGLANG_USE_ROCM_AITER_TGEMM
 if _USE_AITER_TGEMM:
     from aiter.tuned_gemm import tgemm
+_IS_GFX1250_TGEMM = _USE_AITER_TGEMM and is_gfx1250_supported()
 # gfx1250 has no tuned hipBLASLt bf16 kernels. For FLUX.2 shapes FlyDSL's a16w16
 # runs 930-960 TFLOPS vs 650-700 for Inductor's templates and ~880 for tgemm.
-if USE_AITER_GFX1250:
+# tgemm-only configs take it too, so large outputs never reach tgemm's 2 GiB bug.
+_USE_FLYDSL_GFX1250 = USE_AITER_GFX1250 or _IS_GFX1250_TGEMM
+# FlyDSL's output buffer descriptor holds a 32-bit byte count; rows past 4 GiB are
+# wrong (Wan2.2 720p FFN-up at 176400 tokens), so larger outputs run in M chunks.
+_FLYDSL_MAX_OUT_BYTES = 2**32
+if _USE_FLYDSL_GFX1250:
     from aiter.ops.flydsl.gemm_a16w16_gfx1250 import gemm_a16w16 as _flydsl_gemm
 
     @register_custom_op(
@@ -70,19 +77,24 @@ if USE_AITER_GFX1250:
         num_cus = torch.cuda.get_device_properties(x.device).multi_processor_count
         # Measured on FLUX.2 shapes; 128-row tiles only when 256x256 underfills the CUs.
         tile_m = 256 if -(-m // 256) * -(-n // 256) >= num_cus else 128
-        out = _flydsl_gemm(
-            x_2d,
-            weight,
-            bias=bias,
-            dtype=x.dtype,
-            tile_m=tile_m,
-            tile_n=256,
-            tile_k=64,
-            m_warp=2,
-            n_warp=4,
-            num_buffers=4,
-            variant="compute_bound",
-        )
+        out = x_2d.new_empty(m, n)
+        rows = (_FLYDSL_MAX_OUT_BYTES - 1) // (n * out.element_size())
+        rows = max(rows // tile_m * tile_m, tile_m)
+        for m0 in range(0, m, rows):
+            _flydsl_gemm(
+                x_2d[m0 : m0 + rows],
+                weight,
+                bias=bias,
+                dtype=x.dtype,
+                y=out[m0 : m0 + rows],
+                tile_m=tile_m,
+                tile_n=256,
+                tile_k=64,
+                m_warp=2,
+                n_warp=4,
+                num_buffers=4,
+                variant="compute_bound",
+            )
         return out.view(*x.shape[:-1], n)
 
 
@@ -96,7 +108,7 @@ def _use_flydsl_linear(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
 ) -> bool:
     return (
-        USE_AITER_GFX1250
+        _USE_FLYDSL_GFX1250
         and x.dtype in (torch.bfloat16, torch.float16)
         and weight.dtype == x.dtype
         and (bias is None or bias.dtype == x.dtype)
@@ -107,8 +119,13 @@ def _use_flydsl_linear(
     )
 
 
-# aiter gemm_a16w16 kernels index operands with int32 offsets and fault beyond this.
-_AITER_TGEMM_MAX_NUMEL = 2**31
+def _aiter_tgemm_max_numel() -> int:
+    # aiter gemm_a16w16 kernels index operands with int32 offsets and fault beyond this.
+    # On gfx1250 the offset is in bytes and output rows past 2**31 bytes come back
+    # wrong (no fault), so the 16-bit element bound there is 2**30.
+    return 2**30 if _IS_GFX1250_TGEMM else 2**31
+
+
 WEIGHT_LOADER_V2_SUPPORTED = [
     "CompressedTensorsLinearMethod",
     "AWQMarlinLinearMethod",
@@ -260,8 +277,8 @@ def apply_unquantized_linear(
         and x.dtype in (torch.bfloat16, torch.float16)
         and weight.dtype == x.dtype
         and (bias is None or bias.dtype == x.dtype)
-        and x.numel() < _AITER_TGEMM_MAX_NUMEL
-        and x.numel() // x.shape[-1] * weight.shape[0] < _AITER_TGEMM_MAX_NUMEL
+        and x.numel() < _aiter_tgemm_max_numel()
+        and x.numel() // x.shape[-1] * weight.shape[0] < _aiter_tgemm_max_numel()
     ):
         return tgemm.mm(x, weight, bias)
 
